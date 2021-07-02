@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+from pathlib import Path
+file = Path(__file__).resolve()
+sys.path.append(str(file.parents[1]))
 from plsc import Entry
 
 if __name__ == "__main__":
@@ -23,10 +27,12 @@ if __name__ == "__main__":
     ins.set_loss_type('arcface')
     ins.set_model_parallel(True)
     ins.set_sample_ratio(0.1)
-    ins.set_mixed_precision(True)
+    ins.set_mixed_precision(False)
+    ins.set_stop_step(150)
     ins.set_train_epochs(17)
     ins.set_test_period(11373)
-    ins.set_train_batch_size(64)
+    ins.set_train_batch_size(128)
+    ins.set_log_period(1)
     ins.set_calc_acc(False)
     ins.set_model_save_dir('./saved_model')
     ins.train()

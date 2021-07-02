@@ -13,12 +13,11 @@
 # limitations under the License.
 
 import math
+from six.moves import reduce
 
 import paddle
 from paddle.utils import unique_name
 from paddle.distributed.fleet.utils import class_center_sample
-
-from . import dist_algo
 
 __all__ = ["BaseModel"]
 
@@ -79,10 +78,10 @@ class BaseModel(object):
         prob = None
         loss = None
         if model_parallel:
-            loss = dist_algo.distributed_margin_softmax_classify(
+            loss = BaseModel._distributed_margin_softmax_classify(
                 x=emb,
                 label=label,
-                class_num=num_classes,
+                nclasses=num_classes,
                 nranks=num_ranks,
                 rank_id=rank_id,
                 margin1=margin1,
@@ -97,6 +96,93 @@ class BaseModel(object):
                 scale, sample_ratio)
 
         return emb, loss, prob
+
+    @staticmethod
+    def _distributed_margin_softmax_classify(x,
+                                             label,
+                                             nclasses,
+                                             nranks,
+                                             rank_id,
+                                             margin1=1.0,
+                                             margin2=0.5,
+                                             margin3=0.0,
+                                             logit_scale=64.0,
+                                             param_attr=None,
+                                             sample_ratio=1.0,
+                                             name=None):
+        if name is None:
+            name = 'dist@margin_softmax@rank@%05d' % rank_id
+
+        shard_dim = (nclasses + nranks - 1) // nranks
+        if nclasses % nranks != 0:
+            if rank_id == nranks - 1:
+                shard_dim = nclasses % shard_dim
+
+        in_dim = reduce(lambda a, b: a * b, x.shape[1:], 1)
+
+        if param_attr is None:
+            stddev = math.sqrt(2.0 / (in_dim + nclasses))
+            param_attr = paddle.ParamAttr(
+                initializer=paddle.nn.initializer.Normal(std=stddev))
+        weight_shape = [in_dim, shard_dim]
+        weight = paddle.static.create_parameter(
+            shape=weight_shape,
+            dtype=x.dtype,
+            name=name,
+            attr=param_attr,
+            is_bias=False)
+
+        # avoid allreducing gradients for distributed parameters
+        weight.is_distributed = True
+        # avoid broadcasting distributed parameters in startup program
+        paddle.static.default_startup_program().global_block().vars[
+            weight.name].is_distributed = True
+
+        # normalize x
+        x_l2 = paddle.sqrt(paddle.sum(paddle.square(x), axis=1, keepdim=True))
+        norm_x = paddle.divide(x, x_l2)
+
+        norm_x_list = []
+        paddle.distributed.all_gather(norm_x_list, norm_x)
+        norm_x_all = paddle.concat(norm_x_list, axis=0)
+
+        label_list = []
+        paddle.distributed.all_gather(label_list, label)
+        label_all = paddle.concat(label_list, axis=0)
+        label_all.stop_gradient = True
+
+        if sample_ratio < 1.0:
+            # partial fc sample process
+            num_sample = int(shard_dim * sample_ratio)
+            label_all, sampled_class_index = class_center_sample(
+                label_all, shard_dim, num_sample, nranks, rank_id)
+            sampled_class_index.stop_gradient = True
+            weight = paddle.gather(weight, sampled_class_index, axis=1)
+
+        # normalize weight
+        weight_l2 = paddle.sqrt(
+            paddle.sum(paddle.square(weight), axis=0, keepdim=True))
+        norm_weight = paddle.divide(weight, weight_l2)
+
+        shard_logit = paddle.matmul(norm_x_all, norm_weight)
+
+        global_loss, shard_prob = paddle.distributed.collective._c_margin_softmax_with_cross_entropy(
+            shard_logit,
+            label_all,
+            margin1=margin1,
+            margin2=margin2,
+            margin3=margin3,
+            scale=logit_scale,
+            return_softmax=True)
+
+        avg_loss = paddle.mean(global_loss)
+
+        avg_loss._set_info('shard_logit', shard_logit)
+        avg_loss._set_info('shard_prob', shard_prob)
+        avg_loss._set_info('label_all', label_all)
+        avg_loss._set_info('shard_dim', shard_dim)
+
+        return avg_loss
 
     @staticmethod
     def _margin_softmax(input, label, out_dim, param_attr, margin1, margin2,
@@ -116,8 +202,9 @@ class BaseModel(object):
 
         if sample_ratio < 1.0:
             # partial fc sample process
-            label, sampled_class_index = class_center_sample(
-                label, out_dim, ratio=sample_ratio, ignore_label=-1)
+            num_sample = int(out_dim * sample_ratio)
+            label, sampled_class_index = class_center_sample(label, out_dim,
+                                                             num_sample, 1, 0)
             sampled_class_index.stop_gradient = True
             weight = paddle.gather(weight, sampled_class_index, axis=1)
             out_dim = paddle.shape(sampled_class_index)

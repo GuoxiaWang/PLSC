@@ -12,21 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from plsc import Entry
-
-if __name__ == "__main__":
-    ins = Entry()
-    #ins.set_dataset_dir('/path/to/your/data/folder/')
-    ins.set_model_name("ResNet100")
-    ins.set_dataset_dir('/plsc/MS1M_v2/')
-    ins.set_step_boundaries([100000, 140000, 160000])
-    ins.set_loss_type('arcface')
-    ins.set_model_parallel(True)
-    ins.set_sample_ratio(0.1)
-    ins.set_mixed_precision(True)
-    ins.set_train_epochs(17)
-    ins.set_test_period(11373)
-    ins.set_train_batch_size(64)
-    ins.set_calc_acc(False)
-    ins.set_model_save_dir('./saved_model')
-    ins.train()
+sh run_single_node.sh r50 128 fp32
+sh run_single_node.sh r50 128 fp16
+sh run_single_node.sh r100 128 fp32
+sh run_single_node.sh r100 128 fp16

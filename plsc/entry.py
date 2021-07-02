@@ -35,7 +35,6 @@ from paddle.optimizer import Optimizer
 paddle.enable_static()
 
 from . import config
-from .models import DistributedClassificationOptimizer
 from .models import base_model
 from .models import resnet
 from .utils import jpeg_reader as reader
@@ -137,6 +136,7 @@ class Entry(object):
         self.log_period = 200
         self.test_period = 0
         self.cur_steps = 0
+        self.stop_step = -1
 
         self.input_info = [{
             'name': 'image',
@@ -161,6 +161,8 @@ class Entry(object):
         logger.info('default log period: {}'.format(self.log_period))
         logger.info('default test period: {}'.format(self.test_period))
         logger.info('=' * 30)
+
+        self.set_flags()
 
     def set_model_name(self, model_name):
         """
@@ -218,6 +220,10 @@ class Entry(object):
         self.log_period = period
         logger.info("Set log period to {}.".format(period))
 
+    def set_stop_step(self, stop_step):
+        self.stop_step = stop_step
+        logger.info("Set stop step to {}.".format(stop_step))
+
     def set_test_period(self, period):
         self.test_period = period
         logger.info("Set test period to {}.".format(period))
@@ -255,9 +261,23 @@ class Entry(object):
         self.fp16_user_dict[
             'use_dynamic_loss_scaling'] = use_dynamic_loss_scaling
         self.fp16_user_dict['amp_lists'] = amp_lists
+
         logger.info("Use mixed precision training: {}.".format(use_fp16))
-        for key in self.fp16_user_dict:
-            logger.info("Set {} to {}.".format(key, self.fp16_user_dict[key]))
+        if use_fp16:
+            for key in self.fp16_user_dict:
+                logger.info("Set {} to {}.".format(key, self.fp16_user_dict[
+                    key]))
+
+    def set_flags(self):
+        RELATED_FLAGS_SETTING = {
+            'FLAGS_cudnn_exhaustive_search': 1,
+            'FLAGS_cudnn_batchnorm_spatial_persistent': 1,
+            'FLAGS_max_inplace_grad_add': 8,
+        }
+        for key in RELATED_FLAGS_SETTING:
+            logger.info("Set {} to {}.".format(key, RELATED_FLAGS_SETTING[
+                key]))
+        paddle.fluid.set_flags(RELATED_FLAGS_SETTING)
 
     def set_test_batch_size(self, batch_size):
         self.test_batch_size = batch_size
@@ -496,13 +516,7 @@ class Entry(object):
                 weight_decay=paddle.regularizer.L2Decay(5e-4))
             self.optimizer = optimizer
 
-        if self.model_parallel:
-            self.optimizer = DistributedClassificationOptimizer(
-                self.optimizer,
-                self.train_batch_size,
-                use_fp16=self.use_fp16,
-                fp16_user_dict=self.fp16_user_dict)
-        elif self.use_fp16:
+        if self.use_fp16:
             self.optimizer = paddle.static.amp.decorate(
                 optimizer=self.optimizer,
                 init_loss_scaling=self.fp16_user_dict['init_loss_scaling'],
@@ -563,14 +577,11 @@ class Entry(object):
                 if self.calc_train_acc:
                     if self.model_parallel:
                         shard_prob = loss._get_info("shard_prob")
+                        label_all = loss._get_info("label_all")
 
                         prob_list = []
                         paddle.distributed.all_gather(prob_list, shard_prob)
                         prob = paddle.concat(prob_list, axis=1)
-                        label_list = []
-                        paddle.distributed.all_gather(label_list,
-                                                      input_field.label)
-                        label_all = paddle.concat(label_list, axis=0)
                         acc1 = paddle.static.accuracy(
                             input=prob,
                             label=paddle.reshape(label_all, (-1, 1)),
@@ -598,7 +609,7 @@ class Entry(object):
                         dist_optimizer.minimize(loss)
                     else:  # single card training
                         optimizer.minimize(loss)
-                    if self.model_parallel or self.use_fp16:
+                    if self.use_fp16:
                         optimizer = optimizer._optimizer
                 elif use_parallel_test:
                     emb_list = []
@@ -1137,15 +1148,16 @@ class Entry(object):
                     avg_lr = np.mean(local_train_info[1])
                     speed = nsamples / local_time
                     if self.calc_train_acc:
-                        logger.info("Pass:{} batch:{} lr:{:.8f} loss:{:.6f} "
-                                    "qps:{:.2f} acc1:{:.6f} acc5:{:.6f}".
-                                    format(epoch, batch_id, avg_lr, avg_loss,
-                                           speed, acc1[0], acc5[0]))
+                        logger.info(
+                            "Pass:{} batch:{} lr:{:.8f} loss:{:.6f} "
+                            "throughput:{:.2f} acc1:{:.6f} acc5:{:.6f}".format(
+                                epoch, batch_id, avg_lr, avg_loss, speed, acc1[
+                                    0], acc5[0]))
                     else:
                         logger.info(
                             "Pass:{} batch:{} lr:{:.8f} loss:{:.6f} "
-                            "qps:{:.2f}".format(epoch, batch_id, avg_lr,
-                                                avg_loss, speed))
+                            "throughput:{:.2f}".format(epoch, batch_id, avg_lr,
+                                                       avg_loss, speed))
                     local_time = 0
                     nsamples = 0
                     local_train_info = [[], [], [], []]
@@ -1153,6 +1165,9 @@ class Entry(object):
                 if self.test_period > 0 and self.cur_steps % self.test_period == 0:
                     if self.with_test:
                         self.test()
+
+                if self.stop_step > 0 and self.cur_steps == self.stop_step:
+                    exit(-1)
 
             train_loss = np.array(train_info[0]).mean()
             logger.info("End pass {}, train_loss {:.6f}".format(epoch,
