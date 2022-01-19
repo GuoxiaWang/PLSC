@@ -74,7 +74,8 @@ class LargeScaleClassifier(nn.Layer):
         else:
             stddev = math.sqrt(2.0 / (self.embedding_size + self.num_local))
             param_attr = paddle.ParamAttr(
-                name=name, initializer=paddle.nn.initializer.Normal(std=stddev))
+                name=name,
+                initializer=paddle.nn.initializer.Normal(std=stddev))
 
         self.index = None
         self.weight = self.create_parameter(
@@ -83,20 +84,13 @@ class LargeScaleClassifier(nn.Layer):
             is_bias=False,
             dtype='float16' if self.fp16 else 'float32')
 
-        # NOTE(GuoxiaWang): stop full gradient and set is_sparse_grad attr
-        # is_sparse_grad be used fo sparse_momentum
+        # NOTE(GuoxiaWang): stop full gradient and set has_sparse_grad attr
+        # has_sparse_grad be used fo sparse_momentum
         self.weight.is_distributed = True
-        if self.sample_ratio < 1.0:
-            setattr(self.weight, 'is_sparse_grad', True)
-            self.weight.stop_gradient = True
         self.sub_weight = None
-
-    def set_attr_for_sparse_momentum(self):
-        # The attribute are used for sparse_momentum
-        if getattr(self.weight, 'is_sparse_grad', None):
-            setattr(self.weight, 'sparse_grad', self.sub_weight.grad)
-            setattr(self.weight, 'index', self.index)
-            setattr(self.weight, 'axis', 1)
+        if self.sample_ratio < 1.0:
+            setattr(self.weight, 'has_sparse_grad', True)
+            self.weight.stop_gradient = True
 
     def forward(self, feature, label):
 
@@ -124,6 +118,13 @@ class LargeScaleClassifier(nn.Layer):
             # NOTE(GuoxiaWang): stop generate the full gradient when use partial fc,
             # but it need sub gradient.
             self.sub_weight.stop_gradient = False
+
+            def sparse_grad_hook_fn():
+                setattr(self.weight, 'index', self.index)
+                setattr(self.weight, 'axis', 1)
+                self.weight._set_grad_ivar(self.sub_weight.grad)
+
+            self.sub_weight._register_backward_hook(sparse_grad_hook_fn)
 
         else:
             self.sub_weight = self.weight

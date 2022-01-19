@@ -29,7 +29,7 @@ from utils import losses
 from .utils.verification import CallBackVerification
 from .utils.io import Checkpoint
 from .utils.parallel_grad_scaler import HybridParallelGradScaler
-from .utils.hybrid_optimizer import HybridOptimizer
+from .utils.hybrid_momentum import HybridMomentum
 
 from . import classifiers
 from . import backbones
@@ -136,7 +136,7 @@ def train(args):
     backbone.train()
     classifier.train()
 
-    optimizer = HybridOptimizer(
+    optimizer = HybridMomentum(
         parameters=[{
             'params': backbone.parameters(),
         }, {
@@ -156,9 +156,8 @@ def train(args):
             args.data_dir,
             fp16=args.fp16, )
 
-    callback_logging = CallBackLogging(args.log_interval_step, rank,
-                                       world_size, total_steps,
-                                       args.batch_size)
+    callback_logging = CallBackLogging(
+        args.log_interval_step, rank, world_size, total_steps, args.batch_size)
 
     checkpoint = Checkpoint(
         rank=rank,
@@ -216,7 +215,6 @@ def train(args):
                 loss_v = classifier(features, label)
 
             scaler.scale(loss_v).backward()
-            classifier.set_attr_for_sparse_momentum()
             scaler.sync_gradient_and_unscale(optimizer)
             scaler.step(optimizer)
             optimizer.clear_grad()
