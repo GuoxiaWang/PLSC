@@ -15,7 +15,10 @@
 from collections import defaultdict
 from paddle.amp import GradScaler as FrameworkGradScaler
 from paddle.fluid.dygraph.amp import OptimizerState
-from paddle import _legacy_C_ops as _C_ops
+try:
+    from paddle import _legacy_C_ops as _C_ops
+except:
+    from paddle import _C_ops
 import paddle
 
 
@@ -62,12 +65,13 @@ class GradScaler(FrameworkGradScaler):
         param_grads_fp32 = []
         for group in optimizer._param_groups:
             for param in group['params']:
-                if param._grad_ivar() is not None and not any(
+
+                if param.grad is not None and not any(
                         name in param.name for name in self.no_unscale_list):
-                    if param._grad_ivar().dtype == paddle.float16:
-                        param_grads_fp16.append(param._grad_ivar())
+                    if param.grad.dtype == paddle.float16:
+                        param_grads_fp16.append(param.grad)
                     else:
-                        param_grads_fp32.append(param._grad_ivar())
+                        param_grads_fp32.append(param.grad)
 
         if len(param_grads_fp16):
             _C_ops.check_finite_and_unscale(param_grads_fp16, self._scale,

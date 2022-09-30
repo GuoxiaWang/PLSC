@@ -106,8 +106,8 @@ class ParamStorage(object):
                 dev_id) if device == "gpu" else self.buffer.cpu()
             for param in self._params:
                 param.clear_gradient(False)
-                param._gradient_set_empty(False)
-            self.buffer.value().get_tensor()._clear()
+
+            del self.buffer
             self.buffer = tmp_buffer
             self._device = device
 
@@ -174,19 +174,26 @@ class ParamStorage(object):
                                                             .split(":")[1])
         with device_guard(dev_id, "cpu"):
             if in_dygraph_mode():
-                tmp_var = core.eager.Tensor(
-                    self.buffer._slice(self._fill, var_end))
-                tmp_var.get_tensor()._set_dims(param.shape)
+                tmp_var = self.buffer._slice(self._fill, var_end)
+
+                if convert_gpu:
+                    param_cpu = param.cpu()
+                    param._clear_data()
+                    tmp_var.set_value(param_cpu)
+                else:
+                    tmp_var.set_value(param)
+                del tmp_var
+
             else:
                 tmp_var = core.VarBase(
                     tensor=self.buffer._slice(self._fill, var_end))
                 tmp_var.value().get_tensor()._set_dims(param.shape)
-            if convert_gpu:
-                param_cpu = param.cpu()
-                param.value().get_tensor()._clear()
-                tmp_var.set_value(param_cpu)
-            else:
-                tmp_var.set_value(param)
+                if convert_gpu:
+                    param_cpu = param.cpu()
+                    param.value().get_tensor()._clear()
+                    tmp_var.set_value(param_cpu)
+                else:
+                    tmp_var.set_value(param)
 
         self._fill = offset
         return p_shape
@@ -199,11 +206,16 @@ class ParamStorage(object):
         assert offset <= np.prod(self.buffer.shape)
 
         # Convert the param value
-        tmp_tensor = self.buffer._slice(self._fill, var_end)
         if in_dygraph_mode():
-            tmp_tensor = tmp_tensor.value().get_tensor()
-        param.value().get_tensor()._share_data_with(tmp_tensor)
-        param.value().get_tensor()._set_dims(p_shape)
+            dev_id = 0 if paddle.get_device() == "cpu" else int(paddle.get_device().split(":")[1])
+            with device_guard(dev_id, self._device):
+                tmp_tensor = self.buffer._slice(self._fill, var_end)
+                tmp_tensor._share_buffer_to(param)
+                param.get_tensor()._set_dims(p_shape)
+        else:
+            tmp_tensor = self.buffer._slice(self._fill, var_end)
+            param.value().get_tensor()._share_data_with(tmp_tensor)
+            param.value().get_tensor()._set_dims(p_shape)
 
         self._fill = offset
 
@@ -217,11 +229,7 @@ class ParamStorage(object):
 
         self._fill = 0
         for p in self._params:
-            if in_dygraph_mode():
-                self._convert_buffer(p, p.shape,
-                                     self.param2align[p.name])  # modify
-            else:
-                self._convert_buffer(p, p.shape, self.param2align[p.name])  # modify
+            self._convert_buffer(p, p.shape, self.param2align[p.name])  # modify
 
 
 class GradStorage(object):
@@ -308,8 +316,7 @@ class GradStorage(object):
                 dev_id) if device == "gpu" else self.buffer.cpu()
             for param in self._params:
                 param.clear_gradient(False)
-                param._gradient_set_empty(False)
-            self.buffer.value().get_tensor()._clear()
+            del self.buffer
             self.buffer = tmp_buffer
             self._device = device
 
@@ -343,7 +350,6 @@ class GradStorage(object):
             for p in self._params:
                 if p.grad is not None:
                     p.clear_gradient(False)
-                    p._gradient_set_empty(False)
 
             self.buffer = None
             self._fill = 0
@@ -388,8 +394,26 @@ class GradStorage(object):
         # Copy the current grad value to InternalStorage
         dev_id = 0 if paddle.get_device() == "cpu" else int(paddle.get_device()
                                                             .split(":")[1])
-        if self._device == "cpu":
+
+        if in_dygraph_mode():
             with device_guard(dev_id, self._device):
+                tmp_var = self.buffer._slice(self._fill, grad_end)
+                tmp_var.get_tensor()._set_dims(param.shape)
+                param._copy_gradient_from(tmp_var)
+                del tmp_var
+        else:
+            if self._device == "cpu":
+                with device_guard(dev_id, self._device):
+                    if in_dygraph_mode():
+                        tmp_var = core.eager.Tensor(
+                            self.buffer._slice(self._fill, grad_end))
+                        tmp_var.get_tensor()._set_dims(param.shape)
+                    else:
+                        tmp_var = core.VarBase(self.buffer._slice(self._fill, grad_end))
+                        tmp_var.value().get_tensor()._set_dims(param.shape)
+                    param._copy_gradient_from(tmp_var)
+
+            elif self._device == "gpu":
                 if in_dygraph_mode():
                     tmp_var = core.eager.Tensor(
                         self.buffer._slice(self._fill, grad_end))
@@ -398,16 +422,6 @@ class GradStorage(object):
                     tmp_var = core.VarBase(self.buffer._slice(self._fill, grad_end))
                     tmp_var.value().get_tensor()._set_dims(param.shape)
                 param._copy_gradient_from(tmp_var)
-
-        elif self._device == "gpu":
-            if in_dygraph_mode():
-                tmp_var = core.eager.Tensor(
-                    self.buffer._slice(self._fill, grad_end))
-                tmp_var.get_tensor()._set_dims(param.shape)
-            else:
-                tmp_var = core.VarBase(self.buffer._slice(self._fill, grad_end))
-                tmp_var.value().get_tensor()._set_dims(param.shape)
-            param._copy_gradient_from(tmp_var)
 
         self._fill = offset
 

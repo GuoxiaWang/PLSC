@@ -18,7 +18,11 @@ from __future__ import print_function
 
 import math
 import paddle
-from paddle import _legacy_C_ops as _C_ops
+from paddle.fluid.framework import in_dygraph_mode
+try:
+    from paddle import _legacy_C_ops as _C_ops
+except:
+    from paddle import _C_ops
 from .optimizer import Optimizer
 from plsc.utils import logger
 
@@ -70,9 +74,14 @@ class Momentum(Optimizer):
                 if grad is None:
                     continue
 
-                if grad.is_selected_rows():
-                    raise RuntimeError(
-                        'Momentum does not support sparse gradients.')
+                if in_dygraph_mode():
+                    if grad.is_selected_rows():
+                        raise RuntimeError(
+                            'Momentum does not support sparse gradients.')
+                else:
+                    if grad._is_sparse():
+                        raise RuntimeError(
+                            'Momentum does not support sparse gradients.')
 
                 lr = self._get_lr(group)
 

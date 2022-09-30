@@ -18,7 +18,11 @@ from __future__ import print_function
 
 import math
 import paddle
-from paddle import _legacy_C_ops as _C_ops
+from paddle.fluid.framework import in_dygraph_mode
+try:
+    from paddle import _legacy_C_ops as _C_ops
+except:
+    from paddle import _C_ops
 from .optimizer import Optimizer
 from plsc.utils import logger
 
@@ -27,7 +31,7 @@ class AdamW(Optimizer):
     def __init__(self,
                  params,
                  lr=0.001,
-                 betas=(0.9, 0, 999),
+                 betas=(0.9, 0.999),
                  eps=1e-8,
                  weight_decay=0.0,
                  use_master_param=False,
@@ -62,9 +66,14 @@ class AdamW(Optimizer):
                 if grad is None:
                     continue
 
-                if grad.is_selected_rows():
-                    raise RuntimeError(
-                        'Adafactor does not support sparse gradients.')
+                if in_dygraph_mode():
+                    if grad.is_selected_rows():
+                        raise RuntimeError(
+                            'AdamW does not support sparse gradients.')
+                else:
+                    if grad._is_sparse():
+                        raise RuntimeError(
+                            'AdamW does not support sparse gradients.')
 
                 lr = self._get_lr(group)
 

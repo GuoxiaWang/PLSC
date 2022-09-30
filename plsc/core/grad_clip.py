@@ -14,7 +14,10 @@
 
 import warnings
 import paddle
-from paddle import _legacy_C_ops as _C_ops
+try:
+    from paddle import _legacy_C_ops as _C_ops
+except:
+    from paddle import _C_ops
 from plsc.utils import logger
 
 
