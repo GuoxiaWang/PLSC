@@ -23,6 +23,15 @@ from paddle.fluid.framework import EagerParamBase
 from plsc.utils import logger
 
 
+@paddle.no_grad()
+def normal_(x, mean=0., std=1.):
+    temp_value = paddle.normal(mean, std, shape=x.shape)
+    if temp_value.dtype != x.dtype:
+        temp_value = temp_value.astype(x.dtype)
+    x.copy_(temp_value, False)
+    return x
+
+
 def _all_gather(tensor, group=None):
     tensor_shape = list(tensor.shape)
     tensor_shape[0] *= group.nranks
@@ -77,6 +86,34 @@ def all_gather(tensor, axis=0, group=None):
             paddle.split(
                 output, group.nranks, axis=0), axis=axis)
     return output
+
+
+@paddle.no_grad()
+def class_center_sample(label, num_classes, num_samples, group=None):
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    num_local = (num_classes + world_size - 1) // world_size
+    sta = rank * num_local
+    if num_classes % world_size != 0 and rank == world_size - 1:
+        num_local = num_classes % num_local
+    end = sta + num_local
+    local_label = label[paddle.logical_and(label >= sta, label < end)]
+    local_label -= sta
+
+    perm = paddle.rand([num_local])
+    perm[local_label] = 2.0
+
+    index = paddle.topk(perm, k=num_samples)[1]
+    index = paddle.sort(index)
+
+    local_sampled_ids = index + sta
+    sampled_ids = all_gather(local_sampled_ids, axis=0)
+
+    remap = paddle.searchsorted(sampled_ids, label)
+
+    return remap, index
 
 
 class PartialFC(nn.Layer):
@@ -140,15 +177,17 @@ class PartialFC(nn.Layer):
             if name is None:
                 name = 'partialfc.w'
 
-        stddev = math.sqrt(2.0 / (self.embedding_size + self.num_local))
-        param_attr = paddle.ParamAttr(
-            name=name, initializer=paddle.nn.initializer.Normal(std=stddev))
+        # stddev = math.sqrt(2.0 / (self.embedding_size + self.num_local))
+        # param_attr = paddle.ParamAttr(
+        #     name=name, initializer=paddle.nn.initializer.Normal(std=stddev))
 
         self.index = None
         self.weight = self.create_parameter(
             shape=[self.embedding_size, self.num_local],
-            attr=param_attr,
+            # attr=param_attr,
             is_bias=False)
+
+        normal_(self.weight, 0, 0.01)
         self.weight.is_distributed = self.model_parallel
 
         # NOTE(GuoxiaWang): stop full gradient and set has_sparse_grad attr,
@@ -170,8 +209,13 @@ class PartialFC(nn.Layer):
 
         if self.sample_ratio < 1.0:
             # partial fc sample process
-            total_label, self.index = paddle.nn.functional.class_center_sample(
-                total_label, self.num_local, self.num_sample, group=self.group)
+            # total_label, self.index = paddle.nn.functional.class_center_sample(
+            #     total_label, self.num_local, self.num_sample, group=self.group)
+            total_label, self.index = class_center_sample(
+                total_label,
+                self.num_classes,
+                self.num_sample,
+                group=self.group)
             total_label.stop_gradient = True
             self.index.stop_gradient = True
             self.sub_weight = paddle.gather(self.weight, self.index, axis=1)
@@ -196,4 +240,5 @@ class PartialFC(nn.Layer):
         norm_weight = paddle.fluid.layers.l2_normalize(self.sub_weight, axis=0)
 
         local_logit = paddle.matmul(norm_feature, norm_weight)
+        local_logit = paddle.clip(local_logit, min=-1.0, max=1.0)
         return local_logit, total_label

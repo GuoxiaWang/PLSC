@@ -44,6 +44,7 @@ def build_optimizer(config, lr_scheduler, model=None):
     param_group = defaultdict(list)
     for n, p in model.named_parameters():
         state = copy.deepcopy(p.__dict__)
+        state['stop_gradient'] = p.stop_gradient
         if any(nd in n for nd in no_weight_decay_name):
             state['no_weight_decay'] = True
         param_group[str(state)].append(p)
@@ -52,12 +53,14 @@ def build_optimizer(config, lr_scheduler, model=None):
     for key in param_group:
         if 'gpu' not in paddle.get_device():
             continue
+        if "'stop_gradient': True" in key:
+            continue
         if "'is_distributed': True" in key:
             continue
         if "'has_sparse_grad': True" in key:
             continue
-
-        param_group[key] = get_fused_params(param_group[key])
+        param_group[key] = param_group[
+            key]  #get_fused_params(param_group[key])
 
     # bulid optimizer params
     params = []

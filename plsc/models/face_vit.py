@@ -82,6 +82,13 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     return tensor
 
 
+@paddle.no_grad()
+def normal_(x, mean=0., std=1.):
+    temp_value = paddle.normal(mean, std, shape=x.shape)
+    x.set_value(temp_value)
+    return x
+
+
 def to_2tuple(x):
     return tuple([x] * 2)
 
@@ -364,8 +371,8 @@ class FaceViT(Model):
         })
         self.head = PartialFC(**pfc_config)
 
-        trunc_normal_(self.mask_token)
-        trunc_normal_(self.pos_embed)
+        normal_(self.mask_token, std=.02)
+        trunc_normal_(self.pos_embed, std=.02)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
